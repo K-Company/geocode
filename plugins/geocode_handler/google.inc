@@ -39,7 +39,7 @@ function geocode_google_field($field, $field_item) {
     if (!empty($field_item['sub_administrative_area'])) $address .= $field_item['sub_administrative_area'].',';
     if (!empty($field_item['country']))                 $address .= $field_item['country'].',';
     if (!empty($field_item['postal_code']))             $address .= $field_item['postal_code'].',';
-    
+
     $address = rtrim($address,', ');
     return geocode_google($address);
   }

@@ -1,5 +1,7 @@
 <?php
 
+define('GEOCODE_DUMMY_WKT', 'POINT(0, 0)');
+
 /**
  * The Geocode API call.
  * @example:
@@ -109,6 +111,9 @@ function geocode_field_widget_info() {
     'geocode' => array(
       'label' => t('Geocode from another field'),
       'field types' => array('geofield'),
+      'behaviors' => array(
+        'multiple values' => FIELD_BEHAVIOR_CUSTOM,
+      )
     ),
   );
 }
@@ -200,107 +205,76 @@ function geocode_field_widget_settings_form_callback($form, $form_state) {
  */
 function geocode_field_widget_form(&$form, &$form_state, $field, $instance, $langcode, $items, $delta, $base) {
   $element = $base;
-
-  $element['wkt'] = array(
-   '#type' => 'hidden',
-   '#element_validate' => array('geocode_widget_validate'),
-  );
-  $element['geocode_target'] = array(
-   '#type' => 'hidden',
-   '#value' => $instance['field_name'],
-  );
-  $element['geocode_source'] = array(
-   '#type' => 'hidden',
-   '#value' => isset($instance['widget']['settings']['geocode_field']) ? $instance['widget']['settings']['geocode_field'] : '',
-  );
-  $element['geocode_handler'] = array(
-   '#type' => 'hidden',
-   '#value' => isset($instance['widget']['settings']['geocode_handler']) ? $instance['widget']['settings']['geocode_handler'] : '',
-  );
-
+  // Add oru own validation callback
+  if (isset($element['#element_validate'])) {
+    $element['#element_validate'][] = 'geocode_widget_validate';
+  }
+  else {
+    $element['#element_validate'] = array('geocode_widget_validate');
+  }
+  // Store the current values of the fields as en element property.
+  $element['#geocode_previous_values'] = $items;
   return $element;
 }
 
-
+/**
+ * Validation callback for the geocode_field_widget_form form.
+ *
+ * We cannot geocode the field's value here since others fields have not been
+ * validated (or even processed) yet.
+ *
+ */
 function geocode_widget_validate($element, &$form_state) {
-  // To validate, we simply run through the form fields, looking for items with geocode_source and geocode_target properties
-
-  // Walk the form_state values, applying all instances of geocode source and target operations
-  foreach ($form_state['values'] as &$field) {
-    geocode_widget_validate_walkthrough($field, $form_state);
+  // Get previously set value (or dummy).
+  $values = !empty($element['#previous_values']) ? $element['#previous_values'] : array(array('wkt' => GEOCODE_DUMMY_WKT));
+  // Flag this field value for geocoding (in geocode_field_attach_presave).
+  foreach($values as &$value) {
+    $value['geocode'] = TRUE;
   }
-
-  if (isset($form_state['field']['#parents'])) {
-    //Walk through the fields that are under parents and match up and sources and targets there
-    foreach ($form_state['field']['#parents'] as $parent => $parent_data) {
-      foreach ($form_state['values'][$parent] as &$field) {
-        geocode_widget_validate_walkthrough($field, $form_state, $parent);
-      }
-    }
-  }
+  // Set the form value
+  form_set_value($element, $values, $form_state);
 }
 
-
-function geocode_widget_validate_walkthrough(&$field, $form_state, $parent = NULL) {
-  if (is_array($field)) {
-    $lang = isset($form_state['values']['language']) ? $form_state['values']['language'] : LANGUAGE_NONE;
-    if ((!empty($field[$lang][0]['geocode_source']) && !empty($field[$lang][0]['geocode_target']) && !empty($field[$lang][0]['geocode_handler']))) {
-      // We found a source/target/handler set, let's do this.
-      $source = $field[$lang][0]['geocode_source'];
-      $handler = geocode_get_handler($field[$lang][0]['geocode_handler']);
-      $field[$lang] = array();
-      // If the sources is 'title' then pull from the title
-      if ($source == 'title' || $source == 'name') {
-        if (isset($form_state['values'][$source])) {
-          $field_object = array('type' => 'text');
-          $item = array('value' => $form_state['values'][$source]);
-          try {
-            $geometry = call_user_func($handler['field_callback'],$field_object, $item);
+/**
+ * Implements hook_field_attach_presave().
+ *
+ * Geocoding for the geocode widget is done here to ensure that only validated
+ * and fully processed fields values are accessed.
+ */
+function geocode_field_attach_presave($entity_type, $entity) {
+  // Loop over any geofield using our geocode widget
+  $entity_info = entity_get_info($entity_type);
+  $bundle_name = empty($entity_info['entity keys']['bundle']) ? $entity_type : $entity->{$entity_info['entity keys']['bundle']};
+  foreach(field_info_instances($entity_type, $bundle_name) as $field_instance) {
+    if ($field_instance['widget']['type'] === 'geocode') {
+      // Required settings
+      if (isset($field_instance['widget']['settings']['geocode_handler']) && isset($field_instance['widget']['settings']['geocode_field'])) {
+        $handler = geocode_get_handler($field_instance['widget']['settings']['geocode_handler']);
+        $field_name = $field_instance['widget']['settings']['geocode_field'];
+        $field_info = field_info_field($field_name);
+        // Get values from the geocoded field
+        $langcode = field_language($entity_type, $entity, $field_name);
+        $items = field_get_items($entity_type, $entity, $field_name, $langcode);
+        $original_items = field_get_items($entity_type, $entity->original, $field_name, $langcode);
+        if ($items) {
+          $values = field_get_items($entity_type, $entity, $field_instance['field_name'], $langcode);
+          if ($values === FALSE) {
+            $values = array();
           }
-          catch(Exception $e) {
-            drupal_set_message($e->getMessage(),'error');
-            return;
-          }
-
-          if ($geometry) {
-            $field[$lang][0] = geofield_get_values_from_geometry($geometry);
-          }
-        }
-      }
-      else {
-        $field_object = field_info_field($source);
-        if (isset($parent)) {
-          if (isset($form_state['values'][$parent][$source][$lang])) {
-            foreach ($form_state['values'][$parent][$source][$lang] as $delta => $item) {
+          foreach($items as $delta => $item) {
+            // Only process item without a geo value or marked for geocoding (by our widget)
+            if (!isset($values[$delta]) || (!empty($values[$delta]['geocode']) &&  ((isset( $values[$delta]['wkt']) && $values[$delta]['wkt'] === GEOCODE_DUMMY_WKT) || $item !== (isset($original_items[$delta]) ? $original_items[$delta] : array())))) {
               try {
-                $geometry = call_user_func($handler['field_callback'],$field_object, $item);
+                $geometry = call_user_func($handler['field_callback'], $field_info, $item);
               }
               catch(Exception $e) {
                 drupal_set_message($e->getMessage(),'error');
-                return;
               }
-
-              if ($geometry) {
-                $field[$lang][$delta] = geofield_get_values_from_geometry($geometry);
-              }
+              $values[$delta] = $geometry ? geofield_get_values_from_geometry($geometry) : NULL;
             }
           }
-        } else {
-          if (isset($form_state['values'][$source][$lang])) {
-            foreach ($form_state['values'][$source][$lang] as $delta => $item) {
-              try {
-                $geometry = call_user_func($handler['field_callback'],$field_object, $item);
-              }
-              catch(Exception $e) {
-                drupal_set_message($e->getMessage(),'error');
-                return;
-              }
-
-              if ($geometry) {
-                $field[$lang][$delta] = geofield_get_values_from_geometry($geometry);
-              }
-            }
-          }
+          // Filter out any exisitng geofield value without a value in the source field
+          $entity->{$field_instance['field_name']}[$langcode] = array_intersect_key($values, $items);
         }
       }
     }
