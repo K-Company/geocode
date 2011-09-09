@@ -255,7 +255,6 @@ function geocode_field_attach_presave($entity_type, $entity) {
         // Get values from the geocoded field
         $langcode = field_language($entity_type, $entity, $field_name);
         $items = field_get_items($entity_type, $entity, $field_name, $langcode);
-        $original_items = field_get_items($entity_type, $entity->original, $field_name, $langcode);
         if ($items) {
           $values = field_get_items($entity_type, $entity, $field_instance['field_name'], $langcode);
           if ($values === FALSE) {
