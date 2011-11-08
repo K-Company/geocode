@@ -227,12 +227,49 @@ function geocoder_field_widget_form(&$form, &$form_state, $field, $instance, $la
 function geocoder_widget_validate($element, &$form_state) {
   // Get previously set value (or dummy).
   $values = !empty($element['#geocoder_previous_values']) ? $element['#geocoder_previous_values'] : array(array('wkt' => GEOCODE_DUMMY_WKT));
-  // Flag this field value for geocoding (in geocode_field_attach_presave).
+  // Flag this field value for geocoding (in geocode_field_attach_submit).
   foreach($values as &$value) {
     $value['geocode'] = TRUE;
   }
   // Set the form value
   form_set_value($element, $values, $form_state);
+}
+
+/**
+ * Parse the field
+ */
+function geocoder_widget_parse_field($item, $type) {
+  $return = '';
+
+  switch ($type) {
+    case 'addressfield':
+      $return = geocoder_widget_parse_addressfield($item);
+      break;
+    case 'image':
+    case 'file':
+      $return = $item['fid'];
+      break;
+    default:
+      $return = $item['value'];
+  }
+
+  return $return;
+}
+
+/**
+ * Parse and address field
+ */
+function geocoder_widget_parse_addressfield($field_item) {
+  $address = '';
+  if (!empty($field_item['premise']))                 $address .= $field_item['premise'].',';
+  if (!empty($field_item['thoroughfare']))            $address .= $field_item['thoroughfare'].',';
+  if (!empty($field_item['locality']))                $address .= $field_item['locality'].',';
+  if (!empty($field_item['administrative_area']))     $address .= $field_item['administrative_area'].',';
+  if (!empty($field_item['sub_administrative_area'])) $address .= $field_item['sub_administrative_area'].',';
+  if (!empty($field_item['country']))                 $address .= $field_item['country'].',';
+  if (!empty($field_item['postal_code']))             $address .= $field_item['postal_code'].',';
+
+  return $address;
 }
 
 /**
@@ -246,34 +283,51 @@ function geocoder_field_attach_submit($entity_type, $entity, $form, &$form_state
   $bundle_name = empty($entity_info['entity keys']['bundle']) ? $entity_type : $entity->{$entity_info['entity keys']['bundle']};
   foreach(field_info_instances($entity_type, $bundle_name) as $field_instance) {
     if ($field_instance['widget']['type'] === 'geocode') {
-      // Required settings
+      // Check for required settings.
       if (isset($field_instance['widget']['settings']['geocode_handler']) && isset($field_instance['widget']['settings']['geocode_field'])) {
         $handler = geocode_get_handler($field_instance['widget']['settings']['geocode_handler']);
         $field_name = $field_instance['widget']['settings']['geocode_field'];
-        $field_info = field_info_field($field_name);
-        // Get values from the geocoded field
-        $langcode = field_language($entity_type, $entity, $field_name);
-        $items = field_get_items($entity_type, $entity, $field_name, $langcode);
-        if ($items) {
+        // Check for simple cases: geocode node title or taxonomy term name
+        if (($field_name == 'title' || $field_name == 'name') && isset($entity->{$field_name})) {
+          // Use fake text field data
+          $field_info = array('type' => 'text');
+          $items = array(0 => array('value' => $entity->{$field_name}));
+        }
+        else {
+          $field_info = field_info_field($field_name);
+          // Get the field language.
+          // FIXME: Previous code used the following code, not sure which one is correct.
+          // $lang = isset($form_state['values']['language']) ? $form_state['values']['language'] : LANGUAGE_NONE;
+          $langcode = field_language($entity_type, $entity, $field_name);
+          // Get values from the geocoded field.
+          $items = field_get_items($entity_type, $entity, $field_name, $langcode);
+        }
+        if ($field_info && $items) {
+          // Get the current values
           $values = field_get_items($entity_type, $entity, $field_instance['field_name'], $langcode);
           if ($values === FALSE) {
             $values = array();
           }
           foreach($items as $delta => $item) {
-            // Process any item marked for geocoding (by our widget)
-            if (!empty($values[$delta]['geocode'])) {
+            // Process existing value only when marked for geocoding (by our widget).
+            if (empty($values[$delta]) || !empty($values[$delta]['geocode'])) {
               try {
-                $geometry = call_user_func($handler['field_callback'], $field_info, $item);
+                // To avoid any conflicts, just make it text :).
+                $field_object = array('type' => 'text');
+                $field_item = array('value' => geocoder_widget_parse_field($item, $field_info['type']));
+                // Actual geocoding with the selected handler.
+                $geometry = call_user_func($handler['field_callback'], $field_object, $field_item);
+                $values[$delta] = ($geometry instanceof Geometry ) ? geofield_get_values_from_geometry($geometry) : NULL;
               }
               catch(Exception $e) {
-                drupal_set_message($e->getMessage(),'error');
+                drupal_set_message($e->getMessage(), 'error');
+                $values[$delta] = NULL;
               }
-              $values[$delta] = ($geometry instanceof Geometry )? geofield_get_values_from_geometry($geometry) : NULL;
             }
           }
-          // Filter out any exisitng geofield value without a value in the source field
-          $entity->{$field_instance['field_name']}[$langcode] = array_intersect_key($values, $items);
         }
+        // Filter out any exisitng geofield value without a value in the source field
+        $entity->{$field_instance['field_name']}[$langcode] = array_intersect_key($values, $items);
       }
     }
   }
